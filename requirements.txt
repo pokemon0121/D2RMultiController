@@ -1,0 +1,6 @@
+pywin32
+psutil
+fastapi
+uvicorn
+pydantic
+requests
