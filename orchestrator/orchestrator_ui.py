@@ -133,7 +133,7 @@ def run_launch(selected_ids):
             else:
                 log_target(worker_name, tid, f"launch OK → pid={res.get('pid')} hwnd={res.get('hwnd')}")
                 _log_launch_details(worker_name, tid, res)
-            time.sleep(7.0)
+            time.sleep(10)
     threading.Thread(target=worker_thread, daemon=True).start()
 
 
@@ -209,7 +209,7 @@ entry_game = tk.Entry(frame_join, width=28)
 entry_game.grid(row=0, column=1, padx=6)
 
 tk.Label(frame_join, text="Password").grid(row=0, column=2, sticky="w")
-entry_pwd = tk.Entry(frame_join, width=20, show="*")
+entry_pwd = tk.Entry(frame_join, width=20)
 entry_pwd.grid(row=0, column=3, padx=6)
 
 def on_join():

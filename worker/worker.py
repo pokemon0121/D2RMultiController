@@ -950,29 +950,6 @@ def click(req: ClickReq):
     bg_mouse_click_client(hwnd, cx, cy, target_id=req.target_id)
     return JSONResponse({"ok": True, "clicked": {"client": [cx, cy], "wh": [w, h]}})
 
-@app.post("/type")
-def type_text(req: TypeReq):
-    hwnd = TARGET_MAP.get(req.target_id)
-    if not hwnd:
-        refresh_targets()
-        hwnd = TARGET_MAP.get(req.target_id)
-        if not hwnd:
-            return log_and_return(req.target_id, {"ok": False, "error": "target not found"})
-    ensure_restored_no_focus(hwnd)
-    for ch in req.text:
-        code = ord(ch)
-        if ch == "\n":
-            ui_press_enter(hwnd, target_id=req.target_id)
-        elif ch == "\t":
-            bg_send_hotkey(hwnd, [win32con.VK_TAB], target_id=req.target_id)
-        elif 32 <= code < 127:
-            bg_send_char(hwnd, ch, target_id=req.target_id)
-        else:
-            vk = win32api.VkKeyScan(ch) & 0xFF
-            bg_send_hotkey(hwnd, [vk], target_id=req.target_id)
-        sleep_log(req.target_id, 0.005)
-    return log_and_return(req.target_id, {"ok": True})
-
 @app.post("/join_game")
 def join_game(req: JoinReq):
     with JOIN_LOCK:
@@ -1045,23 +1022,12 @@ def leave_game(req: LeaveReq):
         ui = load_uimap(UIMAP_PATH)
         ui_press_esc(hwnd, target_id=req.target_id)
         steps.append("press ESC")
-        sleep_log(req.target_id, 0.15)
+        sleep_log(req.target_id, 0.5)
 
-        if "LeaveButton" in ui:
-            cx, cy = uimap_point_client(hwnd, tuple(ui["LeaveButton"]))
-            cx, cy = (cx, cy)
-            bg_mouse_click_client(hwnd, cx, cy, target_id=req.target_id)
-            steps.append(f"click LeaveButton client@{cx},{cy}")
-            sleep_log(req.target_id, 0.15)
-
-        if "LeaveConfirm" in ui:
-            cx, cy = uimap_point_client(hwnd, tuple(ui["LeaveConfirm"]))
-            cx, cy = (cx, cy)
-            bg_mouse_click_client(hwnd, cx, cy, target_id=req.target_id)
-            steps.append(f"click LeaveConfirm client@{cx},{cy}")
-        else:
-            ui_press_enter(hwnd, target_id=req.target_id)
-            steps.append("press ENTER")
+        cx, cy = uimap_point_client(hwnd, tuple(ui["SaveAndExitButton"]))
+        bg_mouse_click_client(hwnd, cx, cy, target_id=req.target_id)
+        sleep_log(req.target_id, 0.05)
+        steps.append(f"click SaveAndExitButton client@{cx},{cy}")
         return log_and_return(req.target_id, {"ok": True, "steps": steps})
 
 @app.post("/drain_logs")

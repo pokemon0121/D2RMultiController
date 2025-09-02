@@ -13,6 +13,6 @@
     "7": "Worker-ROG",
     "8": "Worker-ROG"
   },
-  "join_delay_sec": 7,
+  "join_delay_sec": 10,
   "join_jitter_sec": 0
 }
