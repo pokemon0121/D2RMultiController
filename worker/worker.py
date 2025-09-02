@@ -251,11 +251,18 @@ def bg_mouse_click_client(hwnd: int, cx: int, cy: int, target_id: str | None = N
     if target_id:
         log_event(target_id, f"winmsg+cursor: sent to {th:08X} at client@{tx},{ty}; abs@{absx},{absy}")
 
+def bg_type_text(hwnd: int, s: str, delay: float = 0.0, target_id: str | None = None):
+    if not s:
+        return
+    for ch in s:
+        code = ord(ch)
+        win32gui.SendMessage(hwnd, win32con.WM_KEYDOWN, code, 0)
+        win32gui.SendMessage(hwnd, win32con.WM_CHAR,    code, 0)
+        if delay and delay > 0:
+            time.sleep(delay)
+    if target_id:
+        log_event(target_id, f"type text '{s}' via KEYDOWN+CHAR")
 
-def bg_send_char(hwnd: int, ch: str, target_id: Optional[str] = None):
-    if target_id is not None:
-        log_event(target_id, f"char '{ch}'")
-    win32api.PostMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
 
 def bg_send_hotkey(hwnd: int, vks: List[int], hold_ms: int = 30, target_id: Optional[str] = None):
     """
@@ -267,11 +274,11 @@ def bg_send_hotkey(hwnd: int, vks: List[int], hold_ms: int = 30, target_id: Opti
     if target_id is not None:
         log_event(target_id, f"hotkey {vks} down ({hold_ms}ms)")
     for vk in vks:
-        win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
+        win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
     if hold_ms and hold_ms > 0:
         time.sleep(hold_ms / 1000.0)
     for vk in reversed(vks):
-        win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk, 0)
+        win32api.SendMessage(hwnd, win32con.WM_KEYUP, vk, 0)
     if target_id is not None:
         log_event(target_id, f"hotkey {vks} up")
 
@@ -989,6 +996,7 @@ def join_game(req: JoinReq):
         sleep_log(req.target_id, 0.05)
         steps.append(f"click GameNameBox client@{cx},{cy}")
 
+        '''
         set_clipboard_text(req.game_name)
         bg_send_hotkey(hwnd, [win32con.VK_CONTROL, ord('A')], target_id=req.target_id)
         sleep_log(req.target_id, 0.5)
@@ -996,25 +1004,27 @@ def join_game(req: JoinReq):
         steps.append(f"copy paste game name: ({req.game_name})")
         
         '''
-        for _ in range(20):
+        for _ in range(10):
             bg_send_hotkey(hwnd, [win32con.VK_BACK], target_id=req.target_id)
+            bg_send_hotkey(hwnd, [win32con.VK_DELETE], target_id=req.target_id)
             sleep_log(req.target_id, 0.005)
         steps.append("clear game name")
 
-        for ch in req.game_name:
-            bg_send_char(hwnd, ch, target_id=req.target_id)
-            sleep_log(req.target_id, 0.005)
+        bg_type_text(hwnd, req.game_name, delay=0.01, target_id=req.target_id)
         steps.append(f"type game name ({len(req.game_name)} chars)")
-        '''
-
+        #'''
+        
         if (req.password or "") != "":
             bg_send_hotkey(hwnd, [win32con.VK_TAB], target_id=req.target_id)
             sleep_log(req.target_id, 0.5)  
-            set_clipboard_text(req.password)
-            bg_send_hotkey(hwnd, [win32con.VK_CONTROL, ord('A')], target_id=req.target_id)
-            sleep_log(req.target_id, 0.5)
-            bg_send_hotkey(hwnd, [win32con.VK_CONTROL, ord('V')], target_id=req.target_id)
-            steps.append(f"copy paste game password: ({req.password})")
+            for _ in range(10):
+                bg_send_hotkey(hwnd, [win32con.VK_BACK], target_id=req.target_id)
+                bg_send_hotkey(hwnd, [win32con.VK_DELETE], target_id=req.target_id)
+                sleep_log(req.target_id, 0.005)
+            steps.append("clear password box")
+
+            bg_type_text(hwnd, req.password, delay=0.01, target_id=req.target_id)
+            steps.append(f"type game password: ({req.password})")
 
         ui_press_enter(hwnd, target_id=req.target_id)
         steps.append("press ENTER")
