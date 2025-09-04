@@ -6,8 +6,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
 from datetime import datetime
-
+from collections import defaultdict
 import requests
+from typing import Callable, Dict, Any, Iterable, List, Optional
+from functools import partial
 
 CFG_PATH = Path(__file__).with_name("config.json")
 COLOR_MAP = {
@@ -121,65 +123,130 @@ def _log_launch_details(worker_name, tid, res):
     if post:
         log_target(worker_name, tid, f"post_launch: {post}")
 
+def orchestrate(
+    selected_ids: Iterable[str],
+    handler: Callable[[str, str], Dict[str, Any]],
+    *,
+    op_name: str,
+    per_worker_delay: float = 10.0,
+    max_parallel_workers: Optional[int] = None,
+) -> threading.Thread:
+    """
+    同一 worker 内按 selected_ids 出现顺序串行，不同 worker 之间并行。
+    handler: (worker_name, tid) -> result(dict-like, 期望包含 ok 字段)
+    返回最外层 orchestrator 线程对象（daemon）。
+    """
+
+    def run_for_worker(worker_name: str, tids_for_worker: List[str]):
+        for tid in tids_for_worker:
+            log_target(worker_name, tid, f"{op_name} start")
+            try:
+                res = handler(worker_name, tid) or {}
+            except Exception as e:
+                res = {"ok": False, "error": f"{op_name} error: {e}"}
+
+            if not res or res.get("ok") is False:
+                log_target(worker_name, tid, f"{op_name} FAIL → {res}")
+            else:
+                log_target(
+                    worker_name,
+                    tid,
+                    f"{op_name} OK → " + ", ".join(
+                        f"{k}={v}" for k, v in res.items() if k in ("pid", "hwnd", "extra")
+                    )
+                )
+            time.sleep(per_worker_delay)
+
+    def orchestrator_thread():
+        # 1) 按出现顺序分组
+        worker_queues: Dict[str, List[str]] = defaultdict(list)
+        worker_order: List[str] = []
+        for tid in selected_ids:
+            wn = TARGET_ASSIGN.get(tid)
+            if not wn:
+                log_target("<unknown>", tid, f"{op_name} skipped: no TARGET_ASSIGN entry")
+                continue
+            if wn not in worker_queues:
+                worker_order.append(wn)
+            worker_queues[wn].append(tid)
+
+        # 2) 控制并发的 worker 数量（可选）
+        limit = max_parallel_workers or len(worker_order)
+        sem = threading.Semaphore(limit)
+
+        # 3) 为每个 worker 开线程并行，线程内保持顺序
+        for wn in worker_order:
+            sem.acquire()
+            def _start_worker(wn=wn):
+                try:
+                    run_for_worker(wn, worker_queues[wn])
+                finally:
+                    sem.release()
+            threading.Thread(target=_start_worker, daemon=True).start()
+
+    t = threading.Thread(target=orchestrator_thread, daemon=True)
+    t.start()
+    return t
+
+def _launch_handler(worker_name: str, tid: str) -> Dict[str, Any]:
+    res = api(worker_name, "/launch", method="POST", payload={"target_id": tid}, timeout=90) or {}
+    if res.get("ok"):
+        _log_launch_details(worker_name, tid, res)
+    return res
 
 def run_launch(selected_ids):
-    def worker_thread():
-        for tid in selected_ids:
-            worker_name = TARGET_ASSIGN[tid]
-            log_target(worker_name, tid, "launch start")
-            res = api(worker_name, "/launch", method="POST", payload={"target_id": tid}, timeout=90)
-            if not res or res.get("ok") is False:
-                log_target(worker_name, tid, f"launch FAIL → {res}")
-            else:
-                log_target(worker_name, tid, f"launch OK → pid={res.get('pid')} hwnd={res.get('hwnd')}")
-                _log_launch_details(worker_name, tid, res)
-            time.sleep(10)
-    threading.Thread(target=worker_thread, daemon=True).start()
+    return orchestrate(
+        selected_ids,
+        handler=_launch_handler,
+        op_name="launch",
+        per_worker_delay=10.0,
+        max_parallel_workers=None  # 或者 2 / 3 做节流
+    )
 
+def _stop_handler(worker_name: str, tid: str) -> Dict[str, Any]:
+    res = api(worker_name, "/stop", method="POST", payload={"target_id": tid}, timeout=90) or {}
+    if res.get("ok"):
+        _log_launch_details(worker_name, tid, res)
+    return res
 
 def run_stop(selected_ids):
-    def worker_thread():
-        for tid in selected_ids:
-            worker_name = TARGET_ASSIGN[tid]
-            log_target(worker_name, tid, f"stop target={tid}")
-            res = api(worker_name, "/stop", method="POST", payload={"target_id": tid})
-            log_target(worker_name, tid, f"→ {res}")
-            time.sleep(0.2)
-    threading.Thread(target=worker_thread, daemon=True).start()
+    return orchestrate(
+        selected_ids,
+        handler=_stop_handler,
+        op_name="stop",
+        per_worker_delay=0.2,
+        max_parallel_workers=None  # 或者 2 / 3 做节流
+    )
 
+def _join_handler(worker_name: str, tid: str, game: str, pwd: str) -> Dict[str, Any]:
+    res = api(worker_name, "/join_game", method="POST", payload={"target_id": tid, "game_name": game, "password": pwd}, timeout=60) or {}
+    if res.get("ok"):
+        _log_launch_details(worker_name, tid, res)
+    return res
 
 def run_join(selected_ids, game, pwd):
-    def worker_thread():
-        for tid in selected_ids:
-            worker_name = TARGET_ASSIGN[tid]
-            log_target(worker_name, tid, f"join_game target={tid} name={game}")
-            res = api(worker_name, "/join_game", method="POST",
-                      payload={"target_id": tid, "game_name": game, "password": pwd},
-                      timeout=30)
-            if not res or res.get("ok") is False:
-                log_target(worker_name, tid, f"join FAIL → {res}")
-            else:
-                log_target(worker_name, tid, f"join OK")
-                for s in (res.get("steps") or []):
-                    log_target(worker_name, tid, f"· {s}")
-            time.sleep(JOIN_DELAY + random.uniform(0, max(0.0, JOIN_JITTER)))
-    threading.Thread(target=worker_thread, daemon=True).start()
+    return orchestrate(
+        selected_ids,
+        handler=partial(_join_handler, game=game, pwd=pwd),
+        op_name="join_game",
+        per_worker_delay=JOIN_DELAY,
+        max_parallel_workers=None  # 或者 2 / 3 做节流
+    )
 
+def _leave_handler(worker_name: str, tid: str) -> Dict[str, Any]:
+    res = api(worker_name, "/leave_game", method="POST", payload={"target_id": tid}, timeout=30) or {}
+    if res.get("ok"):
+        _log_launch_details(worker_name, tid, res)
+    return res
 
 def run_leave(selected_ids):
-    def worker_thread():
-        for tid in selected_ids:
-            worker_name = TARGET_ASSIGN[tid]
-            log_target(worker_name, tid, f"leave_game target={tid}")
-            res = api(worker_name, "/leave_game", method="POST", payload={"target_id": tid}, timeout=15)
-            if not res or res.get("ok") is False:
-                log_target(worker_name, tid, f"leave FAIL → {res}")
-            else:
-                log_target(worker_name, tid, f"[leave OK")
-                for s in (res.get("steps") or []):
-                    log_target(worker_name, tid, f"· {s}")
-            time.sleep(0.5)
-    threading.Thread(target=worker_thread, daemon=True).start()
+    return orchestrate(
+        selected_ids,
+        handler=_leave_handler,
+        op_name="leave_game",
+        per_worker_delay=0.5,
+        max_parallel_workers=None  # 或者 2 / 3 做节流
+    )
 
 # -------------- UI ----------------
 root = tk.Tk()
