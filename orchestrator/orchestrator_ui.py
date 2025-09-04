@@ -256,16 +256,31 @@ frame_targets = tk.LabelFrame(root, text="Targets")
 frame_targets.pack(padx=10, pady=6, fill="x")
 
 var_checks = {}
+def _select_all():
+    for v in var_checks.values():
+        v.set(True)
+
+def _deselect_all():
+    for v in var_checks.values():
+        v.set(False)
+
 for i in range(1, 9):
-    v = tk.BooleanVar(value=(i<=4))
+    v = tk.BooleanVar(value=False)
     cb = tk.Checkbutton(frame_targets, text=str(i), variable=v)
     cb.grid(row=0, column=i-1, padx=4, pady=4)
     var_checks[str(i)] = v
 
+row_targets = 0
+last_col = len(var_checks) - 1
+
+tk.Button(frame_targets, text="Select All", command=_select_all)\
+  .grid(row=row_targets, column=last_col+1, padx=(12,4), pady=0, sticky="w")
+tk.Button(frame_targets, text="Deselect All", command=_deselect_all)\
+  .grid(row=row_targets, column=last_col+2, padx=4, pady=0, sticky="w")
+
 frame_ops_top = tk.Frame(root)
 frame_ops_top.pack(padx=10, pady=6, fill="x")
 tk.Button(frame_ops_top, text="Launch Selected", command=lambda: run_launch([tid for tid,v in var_checks.items() if v.get()])).pack(side="left", padx=4)
-# 去掉 Kill，只保留 Stop（优雅退出）
 tk.Button(frame_ops_top, text="Stop Selected", command=lambda: run_stop([tid for tid,v in var_checks.items() if v.get()])).pack(side="left", padx=4)
 
 frame_join = tk.LabelFrame(root, text="Join / Leave")
