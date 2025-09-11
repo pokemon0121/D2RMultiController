@@ -31,6 +31,7 @@ from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
 from threading import Thread
 from contextlib import asynccontextmanager
 
+CLICK_LOCK = threading.RLock()  # 可重入，防止同一线程嵌套调用死锁
 AUDIO_LOCK = Lock()
 AUDIO_AUTO_FOLLOW_FOREGROUND = True   # ← 开关：是否跟随系统前台窗口自动静音/解静音
 
@@ -50,7 +51,13 @@ if not ok or aw != 3:
         # 最差也用 system-aware（不完美，但统一成一套）
         ctypes.windll.user32.SetProcessDPIAware()
 
+def clip_cursor_box(absx: int, absy: int, half: int = 1):
+    rect = wintypes.RECT(absx - half, absy - half,
+                         absx + half + 1, absy + half + 1)
+    user32.ClipCursor(ctypes.byref(rect))
 
+def reset_clip_cursor():
+    user32.ClipCursor(None)
 
 def _is_d2r_session(session) -> bool:
     try:
@@ -342,23 +349,28 @@ def bg_mouse_click_client(hwnd: int, cx: int, cy: int, target_id: str | None = N
     # 1) client -> screen（这一步就不会再抛 1400 了）
     absx, absy = client_phys_to_screen_phys(hwnd, cx, cy)
 
-    # 2) 只移动鼠标 + 只发 WinMsg（不前台）
-    win32api.SetCursorPos((absx, absy))
-    # 命中窗口优先（同 root 时）
-    hit = win32gui.WindowFromPoint((absx, absy))
-    GA_ROOT = 2
-    def _root(h): 
-        try: return win32gui.GetAncestor(h, GA_ROOT)
-        except Exception: return 0
-    th, tx, ty = hwnd, cx, cy
-    if hit and hit != hwnd and _root(hit) == _root(hwnd):
-        tx, ty = win32gui.ScreenToClient(hit, (absx, absy))
-        th = hit
+    with CLICK_LOCK:
+        clip_cursor_box(absx, absy, half=1)
+        try:
+            # 2) 只移动鼠标 + 只发 WinMsg（不前台）
+            win32api.SetCursorPos((absx, absy))
+            # 命中窗口优先（同 root 时）
+            hit = win32gui.WindowFromPoint((absx, absy))
+            GA_ROOT = 2
+            def _root(h): 
+                try: return win32gui.GetAncestor(h, GA_ROOT)
+                except Exception: return 0
+            th, tx, ty = hwnd, cx, cy
+            if hit and hit != hwnd and _root(hit) == _root(hwnd):
+                tx, ty = win32gui.ScreenToClient(hit, (absx, absy))
+                th = hit
 
-    lp = (int(ty) << 16) | (int(tx) & 0xFFFF)
-    win32gui.SendMessage(th, win32con.WM_MOUSEMOVE,   0, lp)
-    win32gui.SendMessage(th, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lp)
-    win32gui.SendMessage(th, win32con.WM_LBUTTONUP,   0, lp)
+            lp = (int(ty) << 16) | (int(tx) & 0xFFFF)
+            win32gui.SendMessage(th, win32con.WM_MOUSEMOVE,   0, lp)
+            win32gui.SendMessage(th, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lp)
+            win32gui.SendMessage(th, win32con.WM_LBUTTONUP,   0, lp)
+        finally:
+            reset_clip_cursor()
 
     if target_id:
         log_event(target_id, f"winmsg+cursor: sent to {th:08X} at client@{tx},{ty}; abs@{absx},{absy}")
