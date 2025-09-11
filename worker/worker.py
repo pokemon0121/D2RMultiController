@@ -24,6 +24,15 @@ import win32com.client  # resolve .lnk
 import ctypes
 from ctypes import wintypes
 import pythoncom
+from fastapi.responses import JSONResponse
+from fastapi.requests import Request
+
+from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+from threading import Thread
+from contextlib import asynccontextmanager
+
+AUDIO_LOCK = Lock()
+AUDIO_AUTO_FOLLOW_FOREGROUND = True   # ← 开关：是否跟随系统前台窗口自动静音/解静音
 
 user32 = ctypes.windll.user32
 
@@ -40,7 +49,110 @@ if not ok or aw != 3:
     except Exception:
         # 最差也用 system-aware（不完美，但统一成一套）
         ctypes.windll.user32.SetProcessDPIAware()
-        
+
+
+
+def _is_d2r_session(session) -> bool:
+    try:
+        p = session.Process
+        if not p: return False
+        return (p.name() or "").lower() == "d2r.exe"
+    except Exception:
+        return False
+
+def _set_mute_for_pid(pid: int, mute: bool):
+    try:
+        pythoncom.CoInitialize()
+        sessions = AudioUtilities.GetAllSessions()
+        for s in sessions:
+            try:
+                if not _is_d2r_session(s): 
+                    continue
+                if not s.Process or s.Process.pid != pid:
+                    continue
+                vol = s._ctl.QueryInterface(ISimpleAudioVolume)
+                vol.SetMute(1 if mute else 0, None)
+            except Exception:
+                continue
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+def _mute_all_d2r_except(active_pid: int | None):
+    """active_pid 为 None 时 → 全部 D2R 静音"""
+    # 先收集所有 D2R 的 PID
+    d2r_pids = set()
+    try:
+        pythoncom.CoInitialize()
+        sessions = AudioUtilities.GetAllSessions()
+        for s in sessions:
+            try:
+                if _is_d2r_session(s) and s.Process:
+                    d2r_pids.add(s.Process.pid)
+            except Exception:
+                continue
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+    # 执行静音/解静音
+    for pid in list(d2r_pids):
+        _set_mute_for_pid(pid, mute=(active_pid is None or pid != active_pid))
+    if active_pid is not None:
+        _set_mute_for_pid(active_pid, mute=False)
+
+def _get_foreground_pid() -> int | None:
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return None
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return pid
+    except Exception:
+        return None
+
+def _is_pid_d2r(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        p = psutil.Process(pid)
+        return (p.name() or "").lower() == "d2r.exe"
+    except Exception:
+        return False
+
+def _audio_follow_foreground_loop():
+    """后台守护线程：根据系统前台窗口自动管理 D2R 静音"""
+    pythoncom.CoInitialize()
+    last_active_pid = object()  # 任意不同初值
+    try:
+        while True:
+            if not AUDIO_AUTO_FOLLOW_FOREGROUND:
+                time.sleep(0.5)
+                continue
+            pid = _get_foreground_pid()
+            # 只有前台变化时才动作，避免无谓调用
+            if pid != last_active_pid:
+                last_active_pid = pid
+                if _is_pid_d2r(pid):
+                    # 只让这个 D2R 发声，其它 D2R 全静音
+                    _mute_all_d2r_except(pid)
+                else:
+                    # 前台不是 D2R → 所有 D2R 全静音
+                    _mute_all_d2r_except(None)
+            time.sleep(0.2)  # 200ms 轮询，足够灵敏
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
+
+
 # ============== Admin / UAC helpers ==============
 
 def _is_admin() -> bool:
@@ -459,54 +571,7 @@ def _do_goto_lobby(target_id: str, hwnd: int) -> dict:
     log_event(target_id, "goto_lobby: done")
     return log_and_return(target_id, {"ok": True, "steps": ["click OnlineTab", "sleep 1s", "click GoToLobbyButton"]})
 
-app = FastAPI()
-
-# ---- Global unhandled exception logger ----
-from fastapi.responses import JSONResponse
-from fastapi.requests import Request
-
-@app.exception_handler(Exception)
-async def _unhandled_exc(request: Request, exc: Exception):
-    try:
-        body = await request.json()
-        target_id = body.get("target_id") if isinstance(body, dict) else None
-    except Exception:
-        target_id = None
-    log_event(target_id or "system", f"unhandled: {type(exc).__name__}: {exc}")
-    return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
-
-@app.post("/goto_lobby")
-def goto_lobby(req: GotoLobbyReq):
-    target_id = req.target_id
-    hwnd = TARGET_MAP.get(target_id)
-    if not hwnd:
-        refresh_targets()
-        hwnd = TARGET_MAP.get(target_id)
-        if not hwnd:
-            return log_and_return(target_id, {"ok": False, "error": "target not found"})
-    ensure_restored_no_focus(hwnd)
-    return _do_goto_lobby(target_id, hwnd)
-
 # ============== Shortcut / Launch helpers ==============
-
-def _resolve_lnk_mcybe(path_str: str):
-    p = Path(path_str)
-    cand = [p]
-    if p.suffix.lower() != ".lnk":
-        cand.append(p.with_suffix(p.suffix + ".lnk" if p.suffix else ".lnk"))
-    for c in cand:
-        if c.exists() and c.is_file() and c.suffix.lower() == ".lnk":
-            pythoncom.CoInitialize()
-            try:
-                shell = win32com.client.Dispatch("WScript.Shell")
-                sc = shell.CreateShortcut(str(c))
-                return sc.Targetpath or "", sc.Arguments or "", sc.WorkingDirectory or ""
-            finally:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
-    return None
 
 def _resolve_lnk_maybe(path_str: str):
     p = Path(path_str)
@@ -814,7 +879,16 @@ class CloseHandleReq(BaseModel):
 
 # ============== FastAPI App ==============
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时拉起后台线程
+    t = Thread(target=_audio_follow_foreground_loop, daemon=True)
+    t.start()
+    yield
+    # 如果需要清理资源可以在这里加
+    # e.g. 结束线程、关闭句柄
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/name")
 def name():
@@ -930,16 +1004,6 @@ def stop(req: StopReq):
     except Exception as e:
         return log_and_return(req.target_id, {"ok": False, "error": str(e)})
 
-@app.post("/focus")
-def focus(req: FocusReq):
-    hwnd = TARGET_MAP.get(req.target_id)
-    if not hwnd:
-        refresh_targets()
-    hwnd = TARGET_MAP.get(req.target_id)
-    if not hwnd:
-        return log_and_return(req.target_id, {"ok": False, "error": "target not found"})
-    ensure_restored_no_focus(hwnd)
-    return log_and_return(req.target_id, {"ok": True})
 
 @app.post("/click")
 def click(req: ClickReq):
@@ -1006,6 +1070,29 @@ def join_game(req: JoinReq):
         ui_press_enter(hwnd, target_id=req.target_id)
         steps.append("press ENTER")
         return log_and_return(req.target_id, {"ok": True, "steps": steps})
+
+@app.exception_handler(Exception)
+async def _unhandled_exc(request: Request, exc: Exception):
+    try:
+        body = await request.json()
+        target_id = body.get("target_id") if isinstance(body, dict) else None
+    except Exception:
+        target_id = None
+    log_event(target_id or "system", f"unhandled: {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+@app.post("/goto_lobby")
+def goto_lobby(req: GotoLobbyReq):
+    target_id = req.target_id
+    hwnd = TARGET_MAP.get(target_id)
+    if not hwnd:
+        refresh_targets()
+        hwnd = TARGET_MAP.get(target_id)
+        if not hwnd:
+            return log_and_return(target_id, {"ok": False, "error": "target not found"})
+    ensure_restored_no_focus(hwnd)
+    return _do_goto_lobby(target_id, hwnd)
+
 
 @app.post("/leave_game")
 def leave_game(req: LeaveReq):
