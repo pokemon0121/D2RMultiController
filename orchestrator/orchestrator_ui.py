@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
+from tkinter import font as tkfont
 from datetime import datetime
 from collections import defaultdict
 import requests
@@ -322,6 +323,11 @@ btn_clear.pack(side="left", padx=(6,0))
 frame_log = tk.LabelFrame(root, text="Log")
 frame_log.pack(padx=10, pady=6, fill="both", expand=True)
 text_log = scrolledtext.ScrolledText(frame_log, height=18, state="disabled")
+LOG_FONT = tkfont.nametofont("TkFixedFont").copy()
+if "Consolas" in tkfont.families():
+    LOG_FONT.configure(family="Consolas")
+LOG_FONT.configure(size=10)
+text_log.configure(font=LOG_FONT)
 for k, color in COLOR_MAP.items():
     text_log.tag_configure(f"T{k}", foreground=color)
 text_log.pack(fill="both", expand=True)
