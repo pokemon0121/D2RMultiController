@@ -8,9 +8,10 @@ from tkinter import messagebox, scrolledtext
 from tkinter import font as tkfont
 from datetime import datetime
 from collections import defaultdict
-import requests
+from tkinter import ttk 
 from typing import Callable, Dict, Any, Iterable, List, Optional
 from functools import partial
+import requests
 
 CFG_PATH = Path(__file__).with_name("config.json")
 COLOR_MAP = {
@@ -215,9 +216,23 @@ def run_stop(selected_ids):
         selected_ids,
         handler=_stop_handler,
         op_name="stop",
-        per_worker_delay=0.2,
+        per_worker_delay=0.5,
         max_parallel_workers=None  # 或者 2 / 3 做节流
     )
+
+# ---- BO handlers ----
+def _bo_handler(worker_name: str, tid: str) -> Dict[str, Any]:
+    return api(worker_name, "/bo", method="POST", payload={"target_id": tid}, timeout=30) or {}
+
+def run_bo(selected_ids):
+    return orchestrate(
+        selected_ids,
+        handler=_bo_handler,
+        op_name="bo_command",
+        per_worker_delay=0.5,
+        max_parallel_workers=None
+    )
+
 
 def _join_handler(worker_name: str, tid: str, game: str, pwd: str) -> Dict[str, Any]:
     res = api(worker_name, "/join_game", method="POST", payload={"target_id": tid, "game_name": game, "password": pwd}, timeout=60) or {}
@@ -252,9 +267,19 @@ def run_leave(selected_ids):
 # -------------- UI ----------------
 root = tk.Tk()
 root.title("D2R Orchestrator")
+# 美化 ttk 外观
+style = ttk.Style()
+try:
+    style.theme_use("clam")
+except Exception:
+    pass
+style.configure("TButton", padding=6)
+style.configure("Nice.TCombobox", padding=4)
+style.map("TButton", relief=[("pressed", "sunken"), ("!pressed", "raised")])
 
 frame_targets = tk.LabelFrame(root, text="Targets")
 frame_targets.pack(padx=10, pady=6, fill="x")
+frame_targets.grid_rowconfigure(0, minsize=34)
 
 var_checks = {}
 def _select_all():
@@ -279,13 +304,66 @@ tk.Button(frame_targets, text="Select All", command=_select_all)\
 tk.Button(frame_targets, text="Deselect All", command=_deselect_all)\
   .grid(row=row_targets, column=last_col+2, padx=4, pady=0, sticky="w")
 
-frame_ops_top = tk.Frame(root)
-frame_ops_top.pack(padx=10, pady=6, fill="x")
-tk.Button(frame_ops_top, text="Launch Selected", command=lambda: run_launch([tid for tid,v in var_checks.items() if v.get()])).pack(side="left", padx=4)
-tk.Button(frame_ops_top, text="Stop Selected", command=lambda: run_stop([tid for tid,v in var_checks.items() if v.get()])).pack(side="left", padx=4)
+# === Unified Toolbar: 左侧 Launch/Stop，右侧 下拉 + BO! ===
+# 用带边框的 LabelFrame 包裹中间这行
+frame_ops_top = tk.LabelFrame(root, text="Controls")   # ← 原来是 tk.Frame(root)
+frame_ops_top.pack(padx=10, pady=6, fill="x", ipady=6)
+
+# 左侧：Launch / Stop（保持 tk.Button 样式）
+toolbar_left = tk.Frame(frame_ops_top)
+toolbar_left.pack(side="left", padx=(0, 8), anchor="w")
+
+tk.Button(
+    toolbar_left, text="Launch Selected",
+    command=lambda: run_launch([tid for tid, v in var_checks.items() if v.get()])
+).pack(side="left", padx=4)
+
+tk.Button(
+    toolbar_left, text="Stop Selected",
+    command=lambda: run_stop([tid for tid, v in var_checks.items() if v.get()])
+).pack(side="left", padx=4)
+
+# 右侧容器：按钮样式的“下拉” + BO!
+toolbar_right = tk.Frame(frame_ops_top)
+toolbar_right.pack(side="right", padx=(0, 8), anchor="e")
+
+bo_target_var = tk.StringVar(value="2")
+
+# 1) 目标选择按钮（按钮外观）
+target_btn = tk.Button(toolbar_right, textvariable=bo_target_var, width=3, relief="raised")
+target_btn.pack(side="left", padx=(0, 6))
+
+# 2) 弹出菜单（1~8）
+target_menu = tk.Menu(root, tearoff=0)
+def _set_target(v: str):
+    bo_target_var.set(v)
+for i in range(1, 9):
+    target_menu.add_command(label=str(i), command=lambda v=str(i): _set_target(v))
+
+def _show_target_menu(evt=None):
+    # 把菜单贴着按钮下边缘弹出
+    x = target_btn.winfo_rootx()
+    y = target_btn.winfo_rooty() + target_btn.winfo_height()
+    target_menu.tk_popup(x, y)
+
+# 点击按钮弹出菜单
+target_btn.configure(command=_show_target_menu)
+
+# 3) BO 按钮（保持 tk.Button 外观）
+def on_bo():
+    target_id = bo_target_var.get()
+    if not target_id:
+        messagebox.showwarning("Warn", "请选择一个 target")
+        return
+    run_bo([target_id])
+
+tk.Button(toolbar_right, text="BO !", command=on_bo).pack(side="left")
+
+
 
 frame_join = tk.LabelFrame(root, text="Join / Leave")
 frame_join.pack(padx=10, pady=6, fill="x")
+frame_join.grid_rowconfigure(0, minsize=34)
 
 tk.Label(frame_join, text="Game Name").grid(row=0, column=0, sticky="w")
 entry_game = tk.Entry(frame_join, width=28)

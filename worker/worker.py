@@ -889,6 +889,9 @@ class StopReq(BaseModel):
 class CloseHandleReq(BaseModel):
     target_id: str
 
+class BoReq(BaseModel):
+    target_id: str
+
 # ============== FastAPI App ==============
 
 @asynccontextmanager
@@ -1025,6 +1028,30 @@ def click(req: ClickReq):
     log_event(req.target_id, f"click client@{cx},{cy}")
     bg_mouse_click_client(hwnd, cx, cy, target_id=req.target_id)
     return JSONResponse({"ok": True, "clicked": {"client": [cx, cy], "wh": [w, h]}})
+
+@app.post("/bo")
+def bo(req: BoReq):
+    target_id = req.target_id
+    hwnd = TARGET_MAP.get(target_id)
+    if not hwnd:
+        refresh_targets()
+        hwnd = TARGET_MAP.get(target_id)
+        if not hwnd:
+            return log_and_return(target_id, {"ok": False, "error": "target not found"})
+
+    ensure_restored_no_focus(hwnd)
+    log_event(target_id, "bo: start")
+
+    try:
+        for label, vk in (("Q", ord('Q')), ("W", ord('W')), ("E", ord('E'))):
+            for i in range(1, 4):  # 1..3
+                log_event(target_id, f"bo: press {label} {i}/3")
+                bg_send_hotkey(hwnd, [vk], target_id=target_id)
+                time.sleep(0.5)
+        log_event(target_id, "bo: end")
+        return log_and_return(target_id, {"ok": True, "steps": ["Qx3", "Wx3", "Ex3", "interval=0.5s"]})
+    except Exception as e:
+        return log_and_return(target_id, {"ok": False, "error": f"bo failed: {e}"})
 
 @app.post("/join_game")
 def join_game(req: JoinReq):
