@@ -723,20 +723,6 @@ def refresh_targets():
         except Exception:
             pass
 
-    try:
-        ws = enumerate_windows_by_title(WINDOW_TITLE_MATCH)
-    except Exception:
-        ws = []
-    idx = 1
-    for hwnd in ws:
-        tid = str(idx)
-        if tid not in TARGET_MAP:
-            try:
-                if win32gui.IsWindow(hwnd):
-                    TARGET_MAP[tid] = hwnd
-            except Exception:
-                pass
-        idx += 1
 
 def discover_d2r_pids():
     pids = []
@@ -846,8 +832,7 @@ WORKER_NAME: str = "Worker-A"
 WINDOW_TITLE_MATCH: str = "Diablo II"
 UIMAP_PATH: str = str(Path(__file__).parent/"uimaps"/"default.json")
 LAUNCHERS: Dict[str, dict] = {}
-POST_LAUNCH: dict = {"enabled": True, "sequence": "default"}
-CLOSE_HANDLE_AFTER_LAUNCH: bool = True
+POST_LAUNCH: dict = {"sequence": "default"}
 JOIN_LOCK = threading.Lock()
 
 # Aspect lock defaults (可被 config.json 覆盖)
@@ -881,6 +866,7 @@ class LeaveReq(BaseModel):
 
 class LaunchReq(BaseModel):
     target_id: str
+    shortcut_path: Optional[str] = None  # 新增
 
 class StopReq(BaseModel):
     target_id: str
@@ -891,6 +877,10 @@ class CloseHandleReq(BaseModel):
 
 class BoReq(BaseModel):
     target_id: str
+
+
+class CheckShortcutReq(BaseModel):
+    shortcut_path: str
 
 # ============== FastAPI App ==============
 
@@ -904,6 +894,15 @@ async def lifespan(app: FastAPI):
     # e.g. 结束线程、关闭句柄
 
 app = FastAPI(lifespan=lifespan)
+
+@app.post("/check_shortcut")
+def check_shortcut(req: CheckShortcutReq):
+    info = _resolve_lnk_maybe(req.shortcut_path)
+    if not info:
+        return {"ok": False, "error": "not a valid .lnk or cannot resolve"}
+    target, base_args, cwd = info
+    return {"ok": True, "target": target, "base_args": base_args, "cwd": cwd}
+
 
 @app.get("/name")
 def name():
@@ -936,9 +935,7 @@ def close_handle(req: CloseHandleReq):
 
 @app.post("/launch")
 def launch(req: LaunchReq):
-    cfg = LAUNCHERS.get(req.target_id, {})
-    if not cfg:
-        return log_and_return(req.target_id, {"ok": False, "error": f"No launcher configured for target {req.target_id}."})
+    cfg = {"shortcut": req.shortcut_path, "args_append": ""}
 
     debug_steps = []
     t0 = time.time()
@@ -976,17 +973,15 @@ def launch(req: LaunchReq):
     if hwnd:
         TARGET_MAP[req.target_id] = hwnd
 
-    if CLOSE_HANDLE_AFTER_LAUNCH and final_pid:
+    # 3) 总是自动 close 句柄（配置项已移除）
+    ok, msg = (False, "Skipped")
+    if final_pid:
         ok, msg = close_other_instance_handle(final_pid)
-    else:
-        ok, msg = (False, "Skipped")
     debug_steps.append(f"handle64: ok={ok} msg={msg}")
 
-    if hwnd and POST_LAUNCH.get("enabled", True):
-        threading.Thread(target=_do_post_launch, args=(req.target_id, hwnd), daemon=True).start()
-        debug_steps.append(f"post_launch: started background seq={POST_LAUNCH.get('sequence','default')}")
-    else:
-        debug_steps.append("post_launch: disabled")
+    # 4) 默认启用 post_launch（配置里不再有 enabled）
+    threading.Thread(target=_do_post_launch, args=(req.target_id, hwnd or 0), daemon=True).start()
+    debug_steps.append(f"post_launch: started background seq={POST_LAUNCH.get('sequence','default')}")
 
     return log_and_return(req.target_id, {
         "ok": True,
@@ -1168,8 +1163,6 @@ def drain_logs(max_items: int = Body(200, embed=True)):
 
 def _do_post_launch(target_id: str, hwnd: int):
     log_event(target_id, "post: start")
-    if not POST_LAUNCH.get("enabled", True):
-        return
     seq = POST_LAUNCH.get("sequence", "default")
     wait_for_start_up = POST_LAUNCH.get("wait_for_start_up", "5.0")
     wait_for_title_load_up = POST_LAUNCH.get("wait_for_title_load_up", "55.0")
@@ -1195,35 +1188,29 @@ def _do_post_launch(target_id: str, hwnd: int):
 
 def main():
     parser = argparse.ArgumentParser(description="D2R Worker (absolute clicks, debug logs, non-blocking post-launch)")
-    parser.add_argument("--config", type=str, default="worker/config.json")
-    parser.add_argument("--name", type=str, help="Worker name override")
-    parser.add_argument("--port", type=int, help="Port override")
-    parser.add_argument("--title", type=str, help="Window title match override")
+    parser.add_argument("--config", type=str, default="../config.json")  # 指向项目根
+    parser.add_argument("--name", type=str, required=True, help="Worker name (must match config.json)")
+    parser.add_argument("--port", type=int, default=5001, help="HTTP port")  # 端口保留为启动参数
     args = parser.parse_args()
 
-    cfg_path = Path(args.config)
+    cfg_path = Path(args.config).resolve()
     if cfg_path.exists():
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        full_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     else:
-        cfg = {}
+        full_cfg = {}
 
-    global WORKER_NAME, WINDOW_TITLE_MATCH, UIMAP_PATH, LAUNCHERS, POST_LAUNCH, CLOSE_HANDLE_AFTER_LAUNCH
-    WORKER_NAME = args.name or cfg.get("worker_name", WORKER_NAME)
-    WINDOW_TITLE_MATCH = args.title or cfg.get("window_title_match", WINDOW_TITLE_MATCH)
-    UIMAP_PATH = cfg.get("uimap_path", UIMAP_PATH)
-    LAUNCHERS = cfg.get("launchers", {})
-    POST_LAUNCH = cfg.get("post_launch", POST_LAUNCH)
-    CLOSE_HANDLE_AFTER_LAUNCH = bool(cfg.get("close_handle_after_launch", CLOSE_HANDLE_AFTER_LAUNCH))
+    # 只读该 worker 名下的配置
+    global WORKER_NAME, UIMAP_PATH, POST_LAUNCH
+    WORKER_NAME = args.name
+    wcfg = (full_cfg.get("workers", {}) or {}).get(WORKER_NAME, {}) or {}
 
-    global LOCK_ASPECT, ASPECT_W, ASPECT_H, ASPECT_ANCHOR, ASPECT_MODE
-    LOCK_ASPECT = bool(cfg.get("lock_aspect", LOCK_ASPECT))
-    ASPECT_W = int(cfg.get("aspect_w", ASPECT_W))
-    ASPECT_H = int(cfg.get("aspect_h", ASPECT_H))
-    ASPECT_ANCHOR = (cfg.get("aspect_anchor", ASPECT_ANCHOR) or "topleft")
-    ASPECT_MODE = (cfg.get("aspect_mode", ASPECT_MODE) or "auto")
+    # 只保留这两个来自 config.json 的字段（其他行为逻辑内置）
+    UIMAP_PATH = wcfg.get("uimap_path", UIMAP_PATH)
+    POST_LAUNCH = wcfg.get("post_launch", POST_LAUNCH)
 
-    port = args.port or int(cfg.get("port", 5001))
+    port = int(args.port)
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
 
 if __name__ == "__main__":
     main()

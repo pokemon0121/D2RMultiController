@@ -8,12 +8,15 @@ from tkinter import messagebox, scrolledtext
 from tkinter import font as tkfont
 from datetime import datetime
 from collections import defaultdict
+import tempfile, os
+from datetime import timezone
 from tkinter import ttk 
 from typing import Callable, Dict, Any, Iterable, List, Optional
 from functools import partial
 import requests
 
-CFG_PATH = Path(__file__).with_name("config.json")
+CFG_PATH = (Path(__file__).resolve().parent.parent / "config.json")
+
 COLOR_MAP = {
     "1": "DeepSkyBlue4",
     "2": "DarkGreen",
@@ -25,9 +28,47 @@ COLOR_MAP = {
     "8": "SaddleBrown",
 }
 
+_autosave_timer = None
+def _atomic_write_json(path: Path, data: dict):
+    # overwrite-only (no backup)
+    tmp = path.with_suffix(".tmp")
+    txt = json.dumps(data, indent=2, ensure_ascii=False)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(txt)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
+
+
+def save_config_debounced():
+    global _autosave_timer, cfg
+    try:
+        cfg["updated_at"] = datetime.now(timezone.utc).astimezone().isoformat()
+        cfg["workers"] = WORKERS
+        cfg["targets"] = TARGETS
+        cfg["assignment"] = ASSIGN
+        cfg["prefs"] = PREFS
+    except Exception as e:
+        log_target(f"[config] compose failed: {e}")
+        return
+
+    def _do_save():
+        global _autosave_timer
+        _autosave_timer = None
+        try:
+            _atomic_write_json(CFG_PATH, cfg)
+            log_target(f"Saved {CFG_PATH.name} @ {datetime.now().strftime('%H:%M:%S')}")
+        except Exception as e:
+            log_target(f"Save error: write {CFG_PATH.name} failed: {e}")
+
+    delay_ms = int(PREFS.get("autosave_debounce_ms", 400))
+    if _autosave_timer:
+        root.after_cancel(_autosave_timer)
+    _autosave_timer = root.after(delay_ms, _do_save)
+
 def load_config():
     if not CFG_PATH.exists():
-        messagebox.showerror("Error", f"Missing config: {CFG_PATH}")
+        log_target(f"[config] missing file: {CFG_PATH}")
         return None
     return json.loads(CFG_PATH.read_text(encoding="utf-8"))
 
@@ -35,16 +76,84 @@ cfg = load_config()
 if cfg is None:
     raise SystemExit(1)
 
-WORKERS = cfg["workers"]
-TARGET_ASSIGN = cfg["target_assign"]
-JOIN_DELAY = float(cfg.get("join_delay_sec", 9))
-JOIN_JITTER = float(cfg.get("join_jitter_sec", 3))
+# 新结构：单一 config.json
+WORKERS = cfg["workers"]                 # dict[str, {url, enabled, d2r_root, join_delay_sec, ...}]
+TARGETS = cfg["targets"]                 # dict[str, {name, lnk}]
+ASSIGN  = cfg["assignment"]              # dict[str, worker_name]
+PREFS   = cfg.get("prefs", {})           # { autosave_debounce_ms, keep_backups }
+UPDATED_AT = cfg.get("updated_at", "")
+
+# 目标运行状态：Idle / Launching / Running / Stopping / Error
+STATE: dict[str, str] = {tid: "Idle" for tid in TARGETS.keys()}
+
+# UI 变量与控件引用
+assign_vars: dict[str, tk.StringVar] = {}
+lnk_labels: dict[str, tk.Label] = {}
+worker_cmbs: dict[str, ttk.Combobox] = {}
+lnk_entries: dict[str, ttk.Entry] = {}
+status_labels: dict[str, tk.Label] = {}
+
+def is_idle(tid: str) -> bool:
+    return STATE.get(str(tid), "Idle") == "Idle"
+
+def resolved_shortcut_for(tid: str) -> str | None:
+    tid = str(tid)
+    wn = ASSIGN.get(tid)
+    if not wn:
+        return None
+    t = TARGETS.get(tid, {}) or {}
+    lnk = (t.get("lnk") or "").strip()
+    if not lnk:
+        return None
+
+    low = lnk.lower()
+    if not (low.endswith(".lnk") or low.endswith(".exe") or low.endswith(".bat")):
+        lnk = lnk + ".lnk"
+
+    root_dir = (WORKERS.get(wn, {}).get("d2r_root") or "").rstrip("\\/")
+    if not root_dir:
+        return None
+    return root_dir + "\\" + lnk
+
+
+def refresh_row_enabled(tid: str):
+    tid = str(tid)
+    idle = is_idle(tid)
+    # Name 是 Label，始终只读
+    if cmb := worker_cmbs.get(tid):
+        cmb.configure(state=("readonly" if idle else "disabled"))
+    if lab := status_labels.get(tid):
+        lab.configure(text=STATE.get(tid, "Idle"))
+
+def refresh_all_rows():
+    for tid in TARGETS.keys():
+        refresh_row_enabled(tid)
+
+def _on_assign_change(tid: str, *_):
+    tid = str(tid)
+    new_wn = assign_vars[tid].get().strip()
+    if not new_wn or new_wn not in WORKERS:
+        # 回退
+        assign_vars[tid].set(ASSIGN.get(tid, ""))
+        return
+    if not is_idle(tid):
+        # 运行中禁止改
+        assign_vars[tid].set(ASSIGN.get(tid, ""))
+        log_target("Assignment blocked: target not Idle")
+        return
+    ASSIGN[tid] = new_wn
+    log_target(new_wn, tid, "assignment updated")
+    save_config_debounced()
+    # 更新一下 resolved path 预览日志（可选）
+    path = resolved_shortcut_for(tid)
+    log_target(new_wn, tid, f"resolved shortcut → {path or '<unavailable>'}")
+
 
 # ---- HTTP helper with clearer errors ----
 
 def api(worker_name, path, method="GET", payload=None, timeout=10):
     base = WORKERS[worker_name]
-    url = f"{base}{path}"
+    url = f"{base['url'].rstrip('/')}{path}"
     try:
         if method == "GET":
             r = requests.get(url, timeout=timeout)
@@ -65,22 +174,54 @@ def api(worker_name, path, method="GET", payload=None, timeout=10):
 
 # ---- logging helpers ----
 
-def log(msg, tag=None):
+def _human_id(tid: str) -> str:
+    try:
+        nm = TARGETS.get(str(tid), {}).get("name") or ""
+    except Exception:
+        nm = ""
+    return f"{tid}:{nm}" if nm else str(tid)
+
+def _do_insert_log(line: str, tag: str | None):
     text_log.configure(state="normal")
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    if tag:
-        text_log.insert(tk.END, f"[{timestamp}] {msg}\n", tag)
-    else:
-        text_log.insert(tk.END, f"[{timestamp}] {msg}\n")
+    text_log.insert(tk.END, line, tag if tag else None)
     text_log.see(tk.END)
     text_log.configure(state="disabled")
 
-def log_target(worker_name, target_id, text):
-    tid = str(target_id)
-    prefix = f"[{worker_name}][target {tid}] "
-    tag = f"T{tid}"
-    log(prefix + text, tag=tag)
+def log_target(worker_or_msg=None, target_id=None, text=None):
+    """
+    通用日志入口（线程安全）：
+      - log_target("config saved")
+      - log_target("Worker-MSI-Desktop", None, "worker online")
+      - log_target("Worker-MSI-Desktop", 3, "launch OK")
+    """
+    # 兼容仅消息用法：log_target("msg")
+    if text is None and target_id is None and isinstance(worker_or_msg, str):
+        worker_name = None
+        msg = worker_or_msg
+        tag = None
+        prefix = ""
+    else:
+        worker_name = worker_or_msg
+        # 前缀 & tag
+        prefix = ""
+        tag = None
+        if worker_name is not None:
+            prefix += f"[{worker_name}]"
+        if target_id is not None:
+            tid = str(target_id)
+            prefix += f"[{_human_id(tid)}] "
+            tag = f"T{tid}"
+        elif prefix:
+            prefix += " "
+        msg = text if text is not None else ""
 
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    line = f"[{timestamp}] {prefix}{msg}\n"
+
+    if threading.current_thread() is threading.main_thread():
+        _do_insert_log(line, tag)
+    else:
+        root.after(0, lambda: _do_insert_log(line, tag))
 
 def clear_log():
     text_log.configure(state="normal")
@@ -94,10 +235,10 @@ def list_all():
         for worker_name in WORKERS.keys():
             res = api(worker_name, "/list", timeout=2)  # list 限制 2s，无重试
             if not res or res.get("ok") is False:
-                log(f"[{worker_name}] /list FAILED → {res}")
+                log_target(worker_name, None, f"/list FAILED → {res}")
             else:
                 n = len(res.get("targets", []))
-                log(f"[{worker_name}] /list OK → targets={n}")
+                log_target(worker_name, None, f"/list OK → targets={n}")
     threading.Thread(target=worker_thread, daemon=True).start()
 
 
@@ -130,7 +271,6 @@ def orchestrate(
     handler: Callable[[str, str], Dict[str, Any]],
     *,
     op_name: str,
-    per_worker_delay: float = 10.0,
     max_parallel_workers: Optional[int] = None,
 ) -> threading.Thread:
     """
@@ -140,7 +280,8 @@ def orchestrate(
     """
 
     def run_for_worker(worker_name: str, tids_for_worker: List[str]):
-        for tid in tids_for_worker:
+        delay = float(WORKERS.get(worker_name, {}).get("join_delay_sec", 0))
+        for idx, tid in enumerate(tids_for_worker):
             log_target(worker_name, tid, f"{op_name} start")
             try:
                 res = handler(worker_name, tid) or {}
@@ -150,23 +291,23 @@ def orchestrate(
             if not res or res.get("ok") is False:
                 log_target(worker_name, tid, f"{op_name} FAIL → {res}")
             else:
-                log_target(
-                    worker_name,
-                    tid,
-                    f"{op_name} OK → " + ", ".join(
-                        f"{k}={v}" for k, v in res.items() if k in ("pid", "hwnd", "extra")
-                    )
-                )
-            time.sleep(per_worker_delay)
+                log_target(worker_name, tid, f"{op_name} OK → " + ", ".join(
+                    f"{k}={v}" for k, v in res.items() if k in ("pid", "hwnd", "extra")
+                ))
+
+            # 仅在同一 worker 的队列内部，任务之间 sleep
+            if delay and (idx + 1) < len(tids_for_worker):
+                time.sleep(delay)
+
 
     def orchestrator_thread():
         # 1) 按出现顺序分组
         worker_queues: Dict[str, List[str]] = defaultdict(list)
         worker_order: List[str] = []
         for tid in selected_ids:
-            wn = TARGET_ASSIGN.get(tid)
+            wn = ASSIGN.get(tid)
             if not wn:
-                log_target("<unknown>", tid, f"{op_name} skipped: no TARGET_ASSIGN entry")
+                log_target("<unknown>", tid, f"{op_name} skipped: no assignment")
                 continue
             if wn not in worker_queues:
                 worker_order.append(wn)
@@ -190,20 +331,46 @@ def orchestrate(
     t.start()
     return t
 
-def _launch_handler(worker_name: str, tid: str) -> Dict[str, Any]:
-    res = api(worker_name, "/launch", method="POST", payload={"target_id": tid}, timeout=90) or {}
-    if res.get("ok"):
-        _log_launch_details(worker_name, tid, res)
-    return res
+def _launch_handler(worker_name: str, tid: str):
+    # 组装 payload：优先带上 resolved shortcut_path
+    payload = {"target_id": str(tid)}
+    try:
+        path = resolved_shortcut_for(str(tid))
+    except Exception:
+        path = None
+    if path:
+        payload["shortcut_path"] = path
+        log_target(worker_name, tid, f"launch with shortcut_path → {path}")
+    else:
+        log_target(worker_name, tid, "launch without shortcut_path (fallback)")
+
+    # 发起调用（其余逻辑不变）
+    return api(worker_name, "/launch", method="POST", payload=payload, timeout=90) or {}
+
 
 def run_launch(selected_ids):
+    def _wrapped_handler(wn, tid):
+        tid = str(tid)
+        STATE[tid] = "Launching"
+        refresh_row_enabled(tid)
+        # （可选）打印解析出的完整路径，便于核对
+        path = resolved_shortcut_for(tid)
+        log_target(wn, tid, f"resolved shortcut → {path or '<unavailable>'}")
+        try:
+            res = _launch_handler(wn, tid) or {}
+        except Exception as e:
+            res = {"ok": False, "error": f"{e}"}
+        STATE[tid] = "Running" if res.get("ok") else "Error"
+        refresh_row_enabled(tid)
+        return res
+
     return orchestrate(
         selected_ids,
-        handler=_launch_handler,
+        handler=_wrapped_handler,
         op_name="launch",
-        per_worker_delay=10.0,
-        max_parallel_workers=None  # 或者 2 / 3 做节流
+        max_parallel_workers=None
     )
+
 
 def _stop_handler(worker_name: str, tid: str) -> Dict[str, Any]:
     res = api(worker_name, "/stop", method="POST", payload={"target_id": tid}, timeout=90) or {}
@@ -212,26 +379,53 @@ def _stop_handler(worker_name: str, tid: str) -> Dict[str, Any]:
     return res
 
 def run_stop(selected_ids):
+    def _wrapped_handler(wn, tid):
+        tid = str(tid)
+        STATE[tid] = "Stopping"
+        refresh_row_enabled(tid)
+        try:
+            res = _stop_handler(wn, tid) or {}
+        except Exception as e:
+            res = {"ok": False, "error": f"{e}"}
+        STATE[tid] = "Idle" if res.get("ok") else "Error"
+        refresh_row_enabled(tid)
+        return res
+
     return orchestrate(
         selected_ids,
-        handler=_stop_handler,
+        handler=_wrapped_handler,
         op_name="stop",
-        per_worker_delay=0.5,
-        max_parallel_workers=None  # 或者 2 / 3 做节流
+        max_parallel_workers=None
     )
+
 
 # ---- BO handlers ----
 def _bo_handler(worker_name: str, tid: str) -> Dict[str, Any]:
     return api(worker_name, "/bo", method="POST", payload={"target_id": tid}, timeout=30) or {}
 
 def run_bo(selected_ids):
+    def _wrapped_handler(wn, tid):
+        tid = str(tid)
+        # bo 是瞬时动作，也把状态临时标记为 Running 以锁编辑
+        prev = STATE.get(tid, "Idle")
+        STATE[tid] = "Running"
+        refresh_row_enabled(tid)
+        try:
+            res = _bo_handler(wn, tid) or {}
+        except Exception as e:
+            res = {"ok": False, "error": f"{e}"}
+        # bo 完成后：若之前是 Idle 就回 Idle；否则保持 Running（按你需要可调整）
+        STATE[tid] = prev if res.get("ok") else "Error"
+        refresh_row_enabled(tid)
+        return res
+
     return orchestrate(
         selected_ids,
-        handler=_bo_handler,
+        handler=_wrapped_handler,
         op_name="bo_command",
-        per_worker_delay=0.5,
         max_parallel_workers=None
     )
+
 
 
 def _join_handler(worker_name: str, tid: str, game: str, pwd: str) -> Dict[str, Any]:
@@ -241,13 +435,28 @@ def _join_handler(worker_name: str, tid: str, game: str, pwd: str) -> Dict[str, 
     return res
 
 def run_join(selected_ids, game, pwd):
+    def _wrapped_handler(wn, tid):
+        tid = str(tid)
+        # join 期间也算 Running（防止编辑）
+        prev = STATE.get(tid, "Idle")
+        STATE[tid] = "Running"
+        refresh_row_enabled(tid)
+        try:
+            res = _join_handler(wn, tid, game, pwd) or {}
+        except Exception as e:
+            res = {"ok": False, "error": f"{e}"}
+        # join 失败 → Error；成功保持 Running
+        STATE[tid] = "Running" if res.get("ok") else "Error"
+        refresh_row_enabled(tid)
+        return res
+
     return orchestrate(
         selected_ids,
-        handler=partial(_join_handler, game=game, pwd=pwd),
+        handler=_wrapped_handler,
         op_name="join_game",
-        per_worker_delay=JOIN_DELAY,
-        max_parallel_workers=None  # 或者 2 / 3 做节流
+        max_parallel_workers=None
     )
+
 
 def _leave_handler(worker_name: str, tid: str) -> Dict[str, Any]:
     res = api(worker_name, "/leave_game", method="POST", payload={"target_id": tid}, timeout=30) or {}
@@ -256,13 +465,26 @@ def _leave_handler(worker_name: str, tid: str) -> Dict[str, Any]:
     return res
 
 def run_leave(selected_ids):
+    def _wrapped_handler(wn, tid):
+        tid = str(tid)
+        STATE[tid] = "Stopping"
+        refresh_row_enabled(tid)
+        try:
+            res = _leave_handler(wn, tid) or {}
+        except Exception as e:
+            res = {"ok": False, "error": f"{e}"}
+        # leave 成功 → 回 Idle；失败 → Error
+        STATE[tid] = "Idle" if res.get("ok") else "Error"
+        refresh_row_enabled(tid)
+        return res
+
     return orchestrate(
         selected_ids,
-        handler=_leave_handler,
+        handler=_wrapped_handler,
         op_name="leave_game",
-        per_worker_delay=0.5,
-        max_parallel_workers=None  # 或者 2 / 3 做节流
+        max_parallel_workers=None
     )
+
 
 # -------------- UI ----------------
 root = tk.Tk()
@@ -303,6 +525,57 @@ tk.Button(frame_targets, text="Select All", command=_select_all)\
   .grid(row=row_targets, column=last_col+1, padx=(12,4), pady=0, sticky="w")
 tk.Button(frame_targets, text="Deselect All", command=_deselect_all)\
   .grid(row=row_targets, column=last_col+2, padx=4, pady=0, sticky="w")
+
+def build_assignment_panel(parent: tk.Widget):
+    frame = tk.LabelFrame(parent, text="Assignment • target → worker")
+    frame.pack(padx=10, pady=6, fill="x")
+
+    # 表头
+    tk.Label(frame, text="ID", width=4).grid(row=0, column=0, padx=(6,4), pady=4, sticky="w")
+    tk.Label(frame, text="Name", width=18, anchor="w").grid(row=0, column=1, padx=(0,10), pady=4, sticky="w")
+    tk.Label(frame, text="LNK (filename)", width=34, anchor="w").grid(row=0, column=2, padx=(0,10), pady=4, sticky="w")
+    tk.Label(frame, text="Worker", width=24, anchor="w").grid(row=0, column=3, padx=(0,10), pady=4, sticky="w")
+    tk.Label(frame, text="Status", width=10, anchor="w").grid(row=0, column=4, padx=(0,10), pady=4, sticky="w")
+
+    # 行
+    row = 1
+    # 用 TARGETS 的 key 顺序（如需 1..8 固定顺序，按 sorted(int) ）
+    for tid in sorted(TARGETS.keys(), key=lambda x: int(x) if str(x).isdigit() else x):
+        tinfo = TARGETS.get(tid, {})
+        name = tinfo.get("name", "")
+        lnk  = tinfo.get("lnk", "")
+        wn   = ASSIGN.get(tid, "")
+
+        # ID
+        tk.Label(frame, text=str(tid), width=4, anchor="w").grid(row=row, column=0, padx=(6,4), pady=2, sticky="w")
+        # Name（只读）
+        lab_name = tk.Label(frame, text=name, width=18, anchor="w")
+        lab_name.grid(row=row, column=1, padx=(0,10), pady=2, sticky="w")
+
+        # LNK（Idle 才能改）
+        lab_lnk = tk.Label(frame, text=lnk, width=34, anchor="w")
+        lab_lnk.grid(row=row, column=2, padx=(0,10), pady=2, sticky="w")
+        lnk_labels[tid] = lab_lnk
+
+        # Worker（Idle 才能改）
+        var_assign = tk.StringVar(value=wn)
+        cmb_worker = ttk.Combobox(frame, textvariable=var_assign, values=list(WORKERS.keys()),
+                                  width=24, state="readonly")
+        cmb_worker.grid(row=row, column=3, padx=(0,10), pady=2, sticky="w")
+        var_assign.trace_add("write", lambda *_a, t=tid: _on_assign_change(t))
+        assign_vars[tid] = var_assign
+        worker_cmbs[tid] = cmb_worker
+
+        # Status
+        lab_status = tk.Label(frame, text=STATE.get(tid, "Idle"), width=10, anchor="w")
+        lab_status.grid(row=row, column=4, padx=(0,10), pady=2, sticky="w")
+        status_labels[tid] = lab_status
+
+        refresh_row_enabled(tid)
+        row += 1
+
+    return frame
+
 
 # === Unified Toolbar: 左侧 Launch/Stop，右侧 下拉 + BO! ===
 # 用带边框的 LabelFrame 包裹中间这行
@@ -409,6 +682,7 @@ text_log.configure(font=LOG_FONT)
 for k, color in COLOR_MAP.items():
     text_log.tag_configure(f"T{k}", foreground=color)
 text_log.pack(fill="both", expand=True)
+frame_assign = build_assignment_panel(root)
 
 def poll_worker_logs():
     def worker_thread():

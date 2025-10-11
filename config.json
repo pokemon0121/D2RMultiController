@@ -1,0 +1,78 @@
+{
+  "updated_at": "2025-10-09T22:12:43.015000-07:00",
+  "workers": {
+    "Worker-MSI-Desktop": {
+      "url": "http://192.168.86.172:5001",
+      "enabled": true,
+      "d2r_root": "C:\\\\Program Files (x86)\\\\Diablo II Resurrected",
+      "join_delay_sec": 7,
+      "uimap_path": "worker/uimaps/default.json",
+      "post_launch": {
+        "sequence": "default",
+        "wait_for_start_up": 5,
+        "wait_for_title_load_up": 10,
+        "wait_for_connect_to_server": 10
+      }
+    },
+    "Worker-ASUS-ROG-Laptop": {
+      "url": "http://192.168.86.28:5001",
+      "enabled": true,
+      "d2r_root": "C:\\\\Program Files (x86)\\\\Diablo II Resurrected",
+      "join_delay_sec": 10,
+      "uimap_path": "worker/uimaps/default.json",
+      "post_launch": {
+        "sequence": "default",
+        "wait_for_start_up": 10,
+        "wait_for_title_load_up": 75,
+        "wait_for_connect_to_server": 40
+      }
+    }
+  },
+  "targets": {
+    "1": {
+      "name": "hammer-pal",
+      "lnk": "1-delphox0121@gmail.com"
+    },
+    "2": {
+      "name": "cold-sor",
+      "lnk": "2-gardevoir0121@163.com"
+    },
+    "3": {
+      "name": "fire-sor",
+      "lnk": "3-gardevoir0121@gmail.com"
+    },
+    "4": {
+      "name": "lightning-sor",
+      "lnk": "4-yimugao@udel.edu"
+    },
+    "5": {
+      "name": "bo-bar",
+      "lnk": "5-740286844@qq.com"
+    },
+    "6": {
+      "name": "foh-pal",
+      "lnk": "6-milotic0121@gmail.com"
+    },
+    "7": {
+      "name": "ww-bar",
+      "lnk": "7-yimugao@gmail.com"
+    },
+    "8": {
+      "name": "ama",
+      "lnk": "8-740286844ru@gmail.com"
+    }
+  },
+  "assignment": {
+    "1": "Worker-MSI-Desktop",
+    "2": "Worker-MSI-Desktop",
+    "3": "Worker-MSI-Desktop",
+    "4": "Worker-MSI-Desktop",
+    "5": "Worker-ASUS-ROG-Laptop",
+    "6": "Worker-ASUS-ROG-Laptop",
+    "7": "Worker-ASUS-ROG-Laptop",
+    "8": "Worker-ASUS-ROG-Laptop"
+  },
+  "prefs": {
+    "autosave_debounce_ms": 400
+  }
+}
