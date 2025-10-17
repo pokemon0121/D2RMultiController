@@ -596,11 +596,31 @@ tk.Button(
     command=lambda: run_stop([tid for tid, v in var_checks.items() if v.get()])
 ).pack(side="left", padx=4)
 
+def _default_bo_target() -> str:
+    # 优先：所有标记 GoToRoFReadyForBO=true 的 target（按数字 ID 升序取第一个）
+    true_ids = [
+        tid for tid, tcfg in (TARGETS or {}).items()
+        if isinstance(tcfg, dict) and (tcfg.get("GoToRoFReadyForBO") is True)
+    ]
+    if true_ids:
+        try:
+            return str(sorted(true_ids, key=lambda x: int(x) if str(x).isdigit() else x)[0])
+        except Exception:
+            return str(sorted(true_ids)[0])
+
+    # 次优先：用户偏好里指定（可选）
+    pref_tid = (PREFS or {}).get("bo_default_target")
+    if pref_tid:
+        return str(pref_tid)
+
+    # 回退：原来的固定 "2"
+    return "1"
+
 # 右侧容器：按钮样式的“下拉” + BO!
 toolbar_right = tk.Frame(frame_ops_top)
 toolbar_right.pack(side="right", padx=(0, 8), anchor="e")
 
-bo_target_var = tk.StringVar(value="2")
+bo_target_var = tk.StringVar(value=_default_bo_target())
 
 # 1) 目标选择按钮（按钮外观）
 target_btn = tk.Button(toolbar_right, textvariable=bo_target_var, width=3, relief="raised")

@@ -2,5 +2,7 @@
   "GoToLobbyButton": [0.53, 0.9],
   "OnlineTab": [0.84, 0.05],
   "GameNameBox": [0.6816, 0.1375],
-  "SaveAndExitButton": [0.5, 0.4382]
+  "SaveAndExitButton": [0.5, 0.4382],
+  "A4TownWP": [0.7883, 0.0889],
+  "A4RoFWPEntry": [0.1406, 0.3611]
 }

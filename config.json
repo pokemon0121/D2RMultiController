@@ -1,5 +1,5 @@
 {
-  "updated_at": "2025-10-09T22:12:43.015000-07:00",
+  "updated_at": "2025-10-16T21:40:41.025556-07:00",
   "workers": {
     "Worker-MSI-Desktop": {
       "url": "http://192.168.86.172:5001",
@@ -12,6 +12,9 @@
         "wait_for_start_up": 5,
         "wait_for_title_load_up": 10,
         "wait_for_connect_to_server": 10
+      },
+      "after_join": {
+        "wait_ready_seconds": 10
       }
     },
     "Worker-ASUS-ROG-Laptop": {
@@ -25,6 +28,9 @@
         "wait_for_start_up": 10,
         "wait_for_title_load_up": 75,
         "wait_for_connect_to_server": 40
+      },
+      "after_join": {
+        "wait_ready_seconds": 15
       }
     }
   },
@@ -47,7 +53,8 @@
     },
     "5": {
       "name": "bo-bar",
-      "lnk": "5-740286844@qq.com"
+      "lnk": "5-740286844@qq.com",
+      "GoToRoFReadyForBO": true
     },
     "6": {
       "name": "foh-pal",
@@ -64,11 +71,11 @@
   },
   "assignment": {
     "1": "Worker-MSI-Desktop",
-    "2": "Worker-MSI-Desktop",
-    "3": "Worker-MSI-Desktop",
+    "2": "Worker-ASUS-ROG-Laptop",
+    "3": "Worker-ASUS-ROG-Laptop",
     "4": "Worker-MSI-Desktop",
-    "5": "Worker-ASUS-ROG-Laptop",
-    "6": "Worker-ASUS-ROG-Laptop",
+    "5": "Worker-MSI-Desktop",
+    "6": "Worker-MSI-Desktop",
     "7": "Worker-ASUS-ROG-Laptop",
     "8": "Worker-ASUS-ROG-Laptop"
   },

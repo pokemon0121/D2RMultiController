@@ -192,6 +192,52 @@ def log_and_return(target_id: Optional[str], payload: dict):
 
 # ============== Helpers: Windows / Input ==============
 
+# === Smooth mouse move settings (可按需微调) ===
+SMOOTH_MOVE_ENABLED: bool = True
+SMOOTH_MOVE_DURATION: float = 0.35  # 总时长，秒
+SMOOTH_MOVE_STEPS: int = 25         # 步数（越大越平滑）
+
+def _smooth_move_to_client(hwnd, cx, cy, duration=SMOOTH_MOVE_DURATION, steps=SMOOTH_MOVE_STEPS, target_id: str | None = None):
+    """
+    将系统鼠标从当前全局坐标平滑移动到指定client坐标(cx, cy)。
+    - hwnd: 目标窗口句柄
+    - cx, cy: client坐标
+    - duration: 移动耗时
+    - steps: 插值步数
+    """
+    if not SMOOTH_MOVE_ENABLED:
+        return
+    try:
+        import win32gui, win32api
+    except Exception as e:
+        # 若没有 pywin32，则直接跳过平滑移动
+        log_event(target_id or "system", f"smooth-move: pywin32 not available, skip ({e})")
+        return
+
+    try:
+        # client -> screen
+        sx, sy = win32gui.ClientToScreen(hwnd, (int(cx), int(cy)))
+        # 当前光标位置
+        x0, y0 = win32gui.GetCursorPos()
+
+        # 若已经很接近，就不必移动
+        if abs(sx - x0) + abs(sy - y0) <= 1:
+            return
+
+        log_event(target_id or "system", f"smooth-move: ({x0},{y0}) -> ({sx},{sy}) in {duration:.2f}s/{steps} steps")
+        dx = (sx - x0) / float(steps)
+        dy = (sy - y0) / float(steps)
+        dt = max(duration / float(steps), 0.001)
+
+        for i in range(1, steps + 1):
+            xi = int(round(x0 + dx * i))
+            yi = int(round(y0 + dy * i))
+            win32api.SetCursorPos((xi, yi))
+            time.sleep(dt)
+    except Exception as e:
+        log_event(target_id or "system", f"smooth-move: error {e}")
+
+
 # ============== Window Rect Utils ==============
 
 _AdjustWindowRectEx = user32.AdjustWindowRectEx
@@ -1103,6 +1149,15 @@ def join_game(req: JoinReq):
 
         ui_press_enter(hwnd, target_id=req.target_id)
         steps.append("press ENTER")
+        
+        # --- Post-join hook: GoToRoFReadyForBO ---
+        if req.target_id in GO_TO_ROF_READY_FOR_BO_TARGETS:
+            threading.Thread(
+                target=_do_goto_rof_ready_for_bo,
+                args=(req.target_id,),
+                daemon=True
+            ).start()
+
         return log_and_return(req.target_id, {"ok": True, "steps": steps})
 
 @app.exception_handler(Exception)
@@ -1159,6 +1214,54 @@ def drain_logs(max_items: int = Body(200, embed=True)):
             out.append(LOGQ.popleft())
     return {"events": out}
 
+
+# === After-Join (per-worker) config & target flags ===
+AFTER_JOIN_WAIT_READY_SEC: float = 10.0  # 默认 X 秒（等角色进入可行动界面）
+GO_TO_ROF_READY_FOR_BO_TARGETS: Set[str] = set()
+
+def _do_goto_rof_ready_for_bo(target_id: str):
+    try:
+        hwnd = TARGET_MAP.get(target_id)
+        if not hwnd:
+            refresh_targets()
+            hwnd = TARGET_MAP.get(target_id)
+            if not hwnd:
+                log_event(target_id, "post-join: target hwnd not found")
+                return
+
+        ensure_restored_no_focus(hwnd)
+        log_event(target_id, f"post-join: wait_ready {AFTER_JOIN_WAIT_READY_SEC:.2f}s")
+        sleep_log(target_id, AFTER_JOIN_WAIT_READY_SEC)
+
+        ui = load_uimap(UIMAP_PATH)
+        for key in ("A4TownWP", "A4RoFWPEntry"):
+            if key not in ui:
+                log_event(target_id, f"post-join: UiMap missing key {key}")
+                return
+
+        # —— 第一次点击前：先平滑移动到 A4TownWP ——
+        cx, cy = uimap_point_client(hwnd, tuple(ui["A4TownWP"]))
+        _smooth_move_to_client(hwnd, cx, cy, target_id=target_id)
+
+        # 点击 A4TownWP
+        log_event(target_id, f"post-join: click A4TownWP client@{cx},{cy}")
+        bg_mouse_click_client(hwnd, cx, cy, target_id=target_id)
+
+        # 固定等待 0.8s
+        sleep_log(target_id, 5)
+
+        # 点击 A4RoFWPEntry（如需也平滑移动，可再加一行 _smooth_move_to_client）
+        cx, cy = uimap_point_client(hwnd, tuple(ui["A4RoFWPEntry"]))
+        log_event(target_id, f"post-join: click A4RoFWPEntry client@{cx},{cy}")
+        bg_mouse_click_client(hwnd, cx, cy, target_id=target_id)
+
+        log_event(target_id, "post-join: GoToRoFReadyForBO done")
+    except Exception as e:
+        log_event(target_id, f"post-join: error {e}")
+
+
+
+
 # ============== Post-Launch sequence ==============
 
 def _do_post_launch(target_id: str, hwnd: int):
@@ -1208,6 +1311,33 @@ def main():
     UIMAP_PATH = wcfg.get("uimap_path", UIMAP_PATH)
     POST_LAUNCH = wcfg.get("post_launch", POST_LAUNCH)
 
+    # === After-join settings from config ===
+    global AFTER_JOIN_WAIT_READY_SEC, GO_TO_ROF_READY_FOR_BO_TARGETS
+
+    # 1) per-worker: 等待秒数（没配就用默认）
+    AFTER_JOIN_WAIT_READY_SEC = float(
+        ((wcfg.get("after_join") or {}).get("wait_ready_seconds") or AFTER_JOIN_WAIT_READY_SEC)
+    )
+
+    # 2) per-target: 收集 GoToRoFReadyForBO 开关（默认 false）
+    GO_TO_ROF_READY_FOR_BO_TARGETS = set()
+    try:
+        # 从顶层 targets 读取（与你现在的 config 结构一致）
+        # 注意：target_id 作为字符串存储，以便与 req.target_id 一致
+        targets_root = (full_cfg.get("targets") or {})
+        for tid, tcfg in targets_root.items():
+            if isinstance(tcfg, dict) and (tcfg.get("GoToRoFReadyForBO") is True):
+                GO_TO_ROF_READY_FOR_BO_TARGETS.add(str(tid))
+    except Exception:
+        pass
+
+    log_event(
+        "system",
+        f"after_join.wait_ready={AFTER_JOIN_WAIT_READY_SEC}s; "
+        f"GoToRoFReadyForBO.targets={sorted(list(GO_TO_ROF_READY_FOR_BO_TARGETS))}"
+    )
+
+    
     port = int(args.port)
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
