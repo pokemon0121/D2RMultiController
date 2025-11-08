@@ -28,7 +28,6 @@ COLOR_MAP = {
     "8": "SaddleBrown",
 }
 
-
 _autosave_timer = None
 def _atomic_write_json(path: Path, data: dict):
     # overwrite-only (no backup)
@@ -84,6 +83,9 @@ ASSIGN  = cfg["assignment"]              # dict[str, worker_name]
 PREFS   = cfg.get("prefs", {})           # { autosave_debounce_ms, keep_backups }
 UPDATED_AT = cfg.get("updated_at", "")
 
+if "target_order" not in PREFS:
+    PREFS["target_order"] = sorted(TARGETS.keys(), key=lambda x: int(x) if x.isdigit() else x)
+    save_config_debounced()
 
 # 目标运行状态：Idle / Launching / Running / Stopping / Error
 STATE: dict[str, str] = {tid: "Idle" for tid in TARGETS.keys()}
@@ -94,8 +96,6 @@ lnk_labels: dict[str, tk.Label] = {}
 worker_cmbs: dict[str, ttk.Combobox] = {}
 lnk_entries: dict[str, ttk.Entry] = {}
 name_vars: dict[str, tk.StringVar] = {}
-
-
 
 def is_idle(tid: str) -> bool:
     return STATE.get(str(tid), "Idle") == "Idle"
@@ -502,32 +502,183 @@ style.configure("TButton", padding=6)
 style.configure("Nice.TCombobox", padding=4)
 style.map("TButton", relief=[("pressed", "sunken"), ("!pressed", "raised")])
 
-frame_targets = tk.LabelFrame(root, text="Targets")
-frame_targets.pack(padx=10, pady=6, fill="x")
-frame_targets.grid_rowconfigure(0, minsize=34)
+# ======== Targets（横向小方块 + 拖拽重排）========
+
 
 var_checks = {}
-def _select_all():
-    for v in var_checks.values():
-        v.set(True)
 
-def _deselect_all():
-    for v in var_checks.values():
-        v.set(False)
+drag_ctx = {
+    "tid": None,           # 当前被拖拽的 target id
+    "ghost": None,         # 跟随鼠标的漂浮Label
+    "start_idx": None,     # 起始索引
+    "start_xy": (0, 0),    # 鼠标起点（屏幕坐标）
+    "hint_idx": None,      # 预览插入位置
+    "widgets": {},         # tid -> 按钮控件
+    "mid_x": [],           # 每个按钮中点的屏幕x坐标（用于定位落点）
+}
 
-for i in range(1, 9):
-    v = tk.BooleanVar(value=False)
-    cb = tk.Checkbutton(frame_targets, text=str(i), variable=v)
-    cb.grid(row=0, column=i-1, padx=4, pady=4)
-    var_checks[str(i)] = v
+def start_drag_target(event, tid):
+    drag_ctx["tid"] = tid
+    drag_ctx["start_x"] = event.x_root
+    drag_ctx["last_hover"] = None  # 上次 hover 的按钮索引
 
-row_targets = 0
-last_col = len(var_checks) - 1
 
-tk.Button(frame_targets, text="Select All", command=_select_all)\
-  .grid(row=row_targets, column=last_col+1, padx=(12,4), pady=0, sticky="w")
-tk.Button(frame_targets, text="Deselect All", command=_deselect_all)\
-  .grid(row=row_targets, column=last_col+2, padx=4, pady=0, sticky="w")
+
+def drag_target(event):
+    tid = drag_ctx.get("tid")
+    if not tid:
+        return
+
+    # 鼠标的全局 x 坐标
+    mx = event.x_root
+
+    # 找最近的按钮 index
+    order = PREFS["target_order"]
+    widgets = drag_ctx["widgets"]
+
+    # 计算中点（一次 rebuild 后已测量）
+    mids = drag_ctx["mid_x"]
+    if not mids:
+        return
+
+    # 找最接近鼠标位置的点
+    closest = min(range(len(mids)), key=lambda i: abs(mids[i] - mx))
+
+    # 如果 hover 改变了，就刷新样式
+    if drag_ctx.get("last_hover") != closest:
+        drag_ctx["last_hover"] = closest
+
+        # 重置所有按钮
+        for i, t in enumerate(order):
+            sel = var_checks[t].get()
+            btn = widgets[t]
+            btn.configure(
+                relief="sunken" if sel else "raised",
+                bg="#C8E6FF" if sel else "#E5E5E5"
+            )
+
+        # 把 hover 的按钮改成 groove 作为“插入提示”
+        t_hover = order[closest]
+        widgets[t_hover].configure(relief="groove")
+
+
+def end_drag_target(event):
+    tid = drag_ctx.get("tid")
+    if not tid:
+        return
+
+    order = PREFS["target_order"]
+    old_idx = order.index(tid)
+    new_idx = drag_ctx.get("last_hover", old_idx)
+
+    # 小移动则当成点击
+    dx = abs(event.x_root - drag_ctx["start_x"])
+    if dx < 5:
+        _toggle_target(tid)
+    else:
+        # 执行顺序变动
+        order.pop(old_idx)
+        order.insert(new_idx, tid)
+        save_config_debounced()
+
+    # 清理 hover 状态
+    drag_ctx["tid"] = None
+    drag_ctx["last_hover"] = None
+
+    rebuild_target_bar()
+
+
+
+def _toggle_target(tid):
+    b = var_checks.setdefault(tid, tk.BooleanVar(value=False))
+    b.set(not b.get())
+    rebuild_target_bar()
+
+def _ensure_target_order():
+    order = PREFS.get("target_order")
+    if not order:
+        order = sorted(TARGETS.keys(), key=lambda x: int(x) if x.isdigit() else x)
+        PREFS["target_order"] = order
+    else:
+        # 容错：当 config 里增删 target 时，修正顺序数组
+        ids = list(TARGETS.keys())
+        order = [t for t in order if t in ids] + [t for t in ids if t not in order]
+        PREFS["target_order"] = order
+
+def selected_ids() -> list[str]:
+    """读取当前被勾选的 targets（供 Launch/Stop/Join/Leave 使用）"""
+    return [tid for tid, v in var_checks.items() if v.get()]
+
+
+def _toggle_target(tid):
+    b = var_checks.setdefault(tid, tk.BooleanVar(value=False))
+    b.set(not b.get())
+    rebuild_target_bar()
+
+def _on_box_click(_evt, tid: str):
+    # 单击数字方块切换选中
+    v = var_checks.setdefault(tid, tk.BooleanVar(value=False))
+    v.set(not v.get())
+
+def _measure_midpoints():
+    """在布局完成后量测每个小方块的屏幕x中点，供命中判断。"""
+    drag_ctx["mid_x"].clear()
+    order = PREFS["target_order"]
+    for tid in order:
+        w = drag_ctx["widgets"][tid]
+        w.update_idletasks()
+        x = w.winfo_rootx()
+        w_ = w.winfo_width()
+        drag_ctx["mid_x"].append(x + w_ // 2)
+
+def rebuild_target_bar():
+    """按 PREFS['target_order'] 重建一排小按钮"""
+    for w in frame_targets.grid_slaves():
+        w.destroy()
+    drag_ctx["widgets"].clear()
+
+    order = PREFS["target_order"]
+    for idx, tid in enumerate(order):
+        sel = var_checks.setdefault(tid, tk.BooleanVar(value=False)).get()
+
+        btn_bg = "#C8E6FF" if sel else "#E5E5E5"
+        btn_relief = "sunken" if sel else "raised"
+
+        btn = tk.Label(
+            frame_targets,
+            text=str(tid),
+            padx=10, pady=4,
+            relief=btn_relief,
+            bg=btn_bg
+        )
+
+        btn.grid(row=0, column=idx, padx=4, pady=6)
+        drag_ctx["widgets"][tid] = btn
+
+        btn.bind("<ButtonPress-1>", lambda e, t=tid: start_drag_target(e, t))
+        btn.bind("<B1-Motion>", drag_target)
+        btn.bind("<ButtonRelease-1>", end_drag_target)
+
+
+
+    # 右侧“全选/全不选”
+    last = len(order)
+    tk.Button(frame_targets, text="Select All", command=lambda: [v.set(True) for v in var_checks.values()])\
+        .grid(row=0, column=last, padx=(12,4))
+    tk.Button(frame_targets, text="Deselect All", command=lambda: [v.set(False) for v in var_checks.values()])\
+        .grid(row=0, column=last+1, padx=4)
+
+    frame_targets.update_idletasks()
+    frame_targets.after(1, _measure_midpoints)
+
+
+# ---- 创建 Targets 容器并初次构建 ----
+frame_targets = tk.LabelFrame(root, text="Targets")
+frame_targets.pack(padx=10, pady=6, fill="x")
+drag_ctx["frame"] = frame_targets
+_ensure_target_order()
+rebuild_target_bar()
+
 
 def build_assignment_panel(parent: tk.Widget):
     frame = tk.LabelFrame(parent, text="Assignment • target → worker")
@@ -577,6 +728,8 @@ def build_assignment_panel(parent: tk.Widget):
 
     return frame
 
+def _selected_ids():
+    return [tid for tid, v in var_checks.items() if v.get()]
 
 # === Unified Toolbar: 左侧 Launch/Stop，右侧 下拉 + BO! ===
 # 用带边框的 LabelFrame 包裹中间这行
@@ -589,13 +742,14 @@ toolbar_left.pack(side="left", padx=(0, 8), anchor="w")
 
 tk.Button(
     toolbar_left, text="Launch Selected",
-    command=lambda: run_launch([tid for tid, v in var_checks.items() if v.get()])
+    command=lambda: run_launch(_selected_ids())
 ).pack(side="left", padx=4)
 
 tk.Button(
     toolbar_left, text="Stop Selected",
-    command=lambda: run_stop([tid for tid, v in var_checks.items() if v.get()])
+    command=lambda: run_stop(_selected_ids())
 ).pack(side="left", padx=4)
+
 
 def _default_bo_target() -> str:
     # 优先：所有标记 GoToRoFReadyForBO=true 的 target（按数字 ID 升序取第一个）
@@ -668,7 +822,7 @@ entry_pwd = tk.Entry(frame_join, width=20)
 entry_pwd.grid(row=0, column=3, padx=6)
 
 def on_join():
-    ids = [tid for tid, v in var_checks.items() if v.get()]
+    ids = _selected_ids()
     game = entry_game.get().strip()
     pwd = entry_pwd.get().strip()
     if not ids or not game:
@@ -676,12 +830,9 @@ def on_join():
         return
     run_join(ids, game, pwd)
 
-btn_join = tk.Button(frame_join, text="Join Selected", command=on_join)
-btn_join.grid(row=0, column=4, padx=6)
-
-# 新增：Leave Game 按钮
-btn_leave = tk.Button(frame_join, text="Leave Game", command=lambda: run_leave([tid for tid,v in var_checks.items() if v.get()]))
+btn_leave = tk.Button(frame_join, text="Leave Game", command=lambda: run_leave(_selected_ids()))
 btn_leave.grid(row=0, column=5, padx=6)
+
 
 frame_ops = tk.Frame(root)
 frame_ops.pack(padx=10, pady=6, fill="x")
