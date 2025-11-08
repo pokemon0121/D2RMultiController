@@ -28,6 +28,7 @@ COLOR_MAP = {
     "8": "SaddleBrown",
 }
 
+
 _autosave_timer = None
 def _atomic_write_json(path: Path, data: dict):
     # overwrite-only (no backup)
@@ -83,6 +84,7 @@ ASSIGN  = cfg["assignment"]              # dict[str, worker_name]
 PREFS   = cfg.get("prefs", {})           # { autosave_debounce_ms, keep_backups }
 UPDATED_AT = cfg.get("updated_at", "")
 
+
 # 目标运行状态：Idle / Launching / Running / Stopping / Error
 STATE: dict[str, str] = {tid: "Idle" for tid in TARGETS.keys()}
 
@@ -91,7 +93,9 @@ assign_vars: dict[str, tk.StringVar] = {}
 lnk_labels: dict[str, tk.Label] = {}
 worker_cmbs: dict[str, ttk.Combobox] = {}
 lnk_entries: dict[str, ttk.Entry] = {}
-status_labels: dict[str, tk.Label] = {}
+name_vars: dict[str, tk.StringVar] = {}
+
+
 
 def is_idle(tid: str) -> bool:
     return STATE.get(str(tid), "Idle") == "Idle"
@@ -118,16 +122,20 @@ def resolved_shortcut_for(tid: str) -> str | None:
 
 def refresh_row_enabled(tid: str):
     tid = str(tid)
-    idle = is_idle(tid)
-    # Name 是 Label，始终只读
     if cmb := worker_cmbs.get(tid):
-        cmb.configure(state=("readonly" if idle else "disabled"))
-    if lab := status_labels.get(tid):
-        lab.configure(text=STATE.get(tid, "Idle"))
+        cmb.configure(state="readonly")
+
 
 def refresh_all_rows():
     for tid in TARGETS.keys():
         refresh_row_enabled(tid)
+
+def _on_name_change(tid, *_):
+    tid = str(tid)
+    if tid not in TARGETS:
+        return
+    TARGETS[tid]["name"] = name_vars[tid].get().strip()
+    save_config_debounced()
 
 def _on_assign_change(tid: str, *_):
     tid = str(tid)
@@ -135,11 +143,6 @@ def _on_assign_change(tid: str, *_):
     if not new_wn or new_wn not in WORKERS:
         # 回退
         assign_vars[tid].set(ASSIGN.get(tid, ""))
-        return
-    if not is_idle(tid):
-        # 运行中禁止改
-        assign_vars[tid].set(ASSIGN.get(tid, ""))
-        log_target("Assignment blocked: target not Idle")
         return
     ASSIGN[tid] = new_wn
     log_target(new_wn, tid, "assignment updated")
@@ -532,10 +535,9 @@ def build_assignment_panel(parent: tk.Widget):
 
     # 表头
     tk.Label(frame, text="ID", width=4).grid(row=0, column=0, padx=(6,4), pady=4, sticky="w")
-    tk.Label(frame, text="Name", width=18, anchor="w").grid(row=0, column=1, padx=(0,10), pady=4, sticky="w")
-    tk.Label(frame, text="LNK (filename)", width=34, anchor="w").grid(row=0, column=2, padx=(0,10), pady=4, sticky="w")
+    tk.Label(frame, text="Name", width=24, anchor="w").grid(row=0, column=1, padx=(0,10), pady=4, sticky="w")
+    tk.Label(frame, text="LNK (filename)", width=28, anchor="w").grid(row=0, column=2, padx=(0,10), pady=4, sticky="w")
     tk.Label(frame, text="Worker", width=24, anchor="w").grid(row=0, column=3, padx=(0,10), pady=4, sticky="w")
-    tk.Label(frame, text="Status", width=10, anchor="w").grid(row=0, column=4, padx=(0,10), pady=4, sticky="w")
 
     # 行
     row = 1
@@ -548,12 +550,16 @@ def build_assignment_panel(parent: tk.Widget):
 
         # ID
         tk.Label(frame, text=str(tid), width=4, anchor="w").grid(row=row, column=0, padx=(6,4), pady=2, sticky="w")
-        # Name（只读）
-        lab_name = tk.Label(frame, text=name, width=18, anchor="w")
-        lab_name.grid(row=row, column=1, padx=(0,10), pady=2, sticky="w")
+        
+        # Name（可编辑）
+        name_vars[tid] = tk.StringVar(value=name)
+        entry_name = ttk.Entry(frame, textvariable=name_vars[tid], width=24)
+        entry_name.grid(row=row, column=1, padx=(0,10), pady=2, sticky="w")
+        # 监听变化写回
+        name_vars[tid].trace_add("write", lambda *_a, t=tid: _on_name_change(t))
 
         # LNK（Idle 才能改）
-        lab_lnk = tk.Label(frame, text=lnk, width=34, anchor="w")
+        lab_lnk = tk.Label(frame, text=lnk, width=28, anchor="w")
         lab_lnk.grid(row=row, column=2, padx=(0,10), pady=2, sticky="w")
         lnk_labels[tid] = lab_lnk
 
@@ -565,11 +571,6 @@ def build_assignment_panel(parent: tk.Widget):
         var_assign.trace_add("write", lambda *_a, t=tid: _on_assign_change(t))
         assign_vars[tid] = var_assign
         worker_cmbs[tid] = cmb_worker
-
-        # Status
-        lab_status = tk.Label(frame, text=STATE.get(tid, "Idle"), width=10, anchor="w")
-        lab_status.grid(row=row, column=4, padx=(0,10), pady=2, sticky="w")
-        status_labels[tid] = lab_status
 
         refresh_row_enabled(tid)
         row += 1

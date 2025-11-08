@@ -1,5 +1,5 @@
 {
-  "updated_at": "2025-10-16T21:40:41.025556-07:00",
+  "updated_at": "2025-11-07T23:05:52.037496-08:00",
   "workers": {
     "Worker-MSI-Desktop": {
       "url": "http://192.168.86.172:5001",
@@ -71,15 +71,25 @@
   },
   "assignment": {
     "1": "Worker-MSI-Desktop",
-    "2": "Worker-ASUS-ROG-Laptop",
+    "2": "Worker-MSI-Desktop",
     "3": "Worker-ASUS-ROG-Laptop",
-    "4": "Worker-MSI-Desktop",
-    "5": "Worker-MSI-Desktop",
+    "4": "Worker-ASUS-ROG-Laptop",
+    "5": "Worker-ASUS-ROG-Laptop",
     "6": "Worker-MSI-Desktop",
     "7": "Worker-ASUS-ROG-Laptop",
     "8": "Worker-ASUS-ROG-Laptop"
   },
   "prefs": {
+    "target_order": [
+      "4",
+      "5",
+      "1",
+      "3",
+      "2",
+      "6",
+      "7",
+      "8"
+    ],
     "autosave_debounce_ms": 400
   }
 }
