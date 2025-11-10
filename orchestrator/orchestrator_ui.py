@@ -270,11 +270,12 @@ def _log_launch_details(worker_name, tid, res):
         log_target(worker_name, tid, f"post_launch: {post}")
 
 def orchestrate(
-    selected_ids: Iterable[str],
-    handler: Callable[[str, str], Dict[str, Any]],
+    selected_ids,
+    handler,
     *,
     op_name: str,
     max_parallel_workers: Optional[int] = None,
+    delay_override: Optional[float] = None,
 ) -> threading.Thread:
     """
     同一 worker 内按 selected_ids 出现顺序串行，不同 worker 之间并行。
@@ -283,7 +284,11 @@ def orchestrate(
     """
 
     def run_for_worker(worker_name: str, tids_for_worker: List[str]):
-        delay = float(WORKERS.get(worker_name, {}).get("join_delay_sec", 0))
+        delay = (
+            delay_override
+            if delay_override is not None
+            else float(WORKERS.get(worker_name, {}).get("join_delay_sec", 0))
+        )
         for idx, tid in enumerate(tids_for_worker):
             log_target(worker_name, tid, f"{op_name} start")
             try:
@@ -398,6 +403,7 @@ def run_stop(selected_ids):
         selected_ids,
         handler=_wrapped_handler,
         op_name="stop",
+        delay_override=1.0,
         max_parallel_workers=None
     )
 
@@ -485,6 +491,7 @@ def run_leave(selected_ids):
         selected_ids,
         handler=_wrapped_handler,
         op_name="leave_game",
+        delay_override=1.0,
         max_parallel_workers=None
     )
 
@@ -829,6 +836,9 @@ def on_join():
         messagebox.showwarning("Warn", "Select targets and input game name.")
         return
     run_join(ids, game, pwd)
+
+btn_join = tk.Button(frame_join, text="Join Game", command=on_join)
+btn_join.grid(row=0, column=4, padx=6)
 
 btn_leave = tk.Button(frame_join, text="Leave Game", command=lambda: run_leave(_selected_ids()))
 btn_leave.grid(row=0, column=5, padx=6)
